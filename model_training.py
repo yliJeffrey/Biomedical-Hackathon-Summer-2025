@@ -163,37 +163,56 @@ final_model.fit(X_train_full, Y_train_full)
 print("Final model training complete.")
 
 
-# --- Step 5: Prepare Hackathon Test Data and Make Final Predictions ---
-X_test_list, test_pairs_for_prediction = [], []
+# --- Step 6: Prepare Hackathon Test Data and Make Final Predictions ---
+X_test_list = []
+test_pairs_for_prediction_sorted = [] # Will store the sorted version for internal use
+
 print("\nBuilding official test dataset for final prediction...")
 for gene1, gene2 in test_double_pairs_tuples:
-    # ... (rest of the prediction logic is the same)
+    # We sort here for model input consistency
     g1_sorted, g2_sorted = sorted((gene1, gene2))
+    
     single_g1_name, single_g2_name = f"{g1_sorted}+ctrl", f"{g2_sorted}+ctrl"
     if single_g1_name in delta_profiles and single_g2_name in delta_profiles:
         X_test_list.append(np.concatenate((delta_profiles[single_g1_name], delta_profiles[single_g2_name])))
-        test_pairs_for_prediction.append((g1_sorted, g2_sorted))
+        test_pairs_for_prediction_sorted.append((g1_sorted, g2_sorted))
     else:
-        print(f"Error: Cannot predict for pair {g1_sorted}+{g2_sorted} due to missing single-gene data. Skipping.")
+        print(f"Error: Cannot predict for pair ({gene1}, {gene2}) due to missing single-gene data. Skipping.")
 
-if not test_pairs_for_prediction:
+if not test_pairs_for_prediction_sorted:
     print("\nWARNING: No final predictions could be made.")
 else:
     X_test = np.array(X_test_list)
-    # Use the FINAL model for this prediction
     predicted_combined_deltas = final_model.predict(X_test)
     predicted_absolute_expressions = predicted_combined_deltas + pseudo_control_profile
-
-    # --- Step 6: Format and Output Final Predictions ---
-
-    # --- NEW: Enforce non-negative expression constraint ---
-    # finds all elements in the predicted_absolute_expressions array that are less than zero and sets their value to 0
     predicted_absolute_expressions[predicted_absolute_expressions < 0] = 0
 
-    predicted_column_names = [f"Predicted_{g1}+{g2}" for g1, g2 in test_pairs_for_prediction]
-    predicted_df_wide = pd.DataFrame(predicted_absolute_expressions.T,
+    # --- Step 7: Format and Output Final Predictions (with Original Order) ---
+    
+    # --- NEW: Map sorted predictions back to original test pair order ---
+    
+    # Create a dictionary mapping the sorted pair to its predicted profile
+    prediction_map = {
+        pair_sorted: predicted_absolute_expressions[i] 
+        for i, pair_sorted in enumerate(test_pairs_for_prediction_sorted)
+    }
+    
+    # Reconstruct the predictions in the original, unsorted order
+    final_predictions_in_original_order = []
+    final_pairs_in_original_order = []
+    for g1_orig, g2_orig in test_double_pairs_tuples:
+        g1_sorted, g2_sorted = sorted((g1_orig, g2_orig))
+        if (g1_sorted, g2_sorted) in prediction_map:
+            final_predictions_in_original_order.append(prediction_map[(g1_sorted, g2_sorted)])
+            final_pairs_in_original_order.append((g1_orig, g2_orig)) # Keep original pair
+
+    # Create the initial "wide" DataFrame with predictions
+    predicted_column_names = [f"Predicted_{g1}+{g2}" for g1, g2 in final_pairs_in_original_order]
+    predicted_df_wide = pd.DataFrame(np.array(final_predictions_in_original_order).T,
                                     index=df_raw_data.index,
                                     columns=predicted_column_names)
+
+    # Convert from wide format to long format
     predicted_df_wide.reset_index(inplace=True)
     predicted_df_wide.rename(columns={predicted_df_wide.columns[0]: 'gene'}, inplace=True)
     
@@ -202,9 +221,10 @@ else:
                              id_vars=['gene'],
                              var_name='perturbation',
                              value_name='expression')
+
     long_format_df['perturbation'] = long_format_df['perturbation'].str.replace('Predicted_', '', regex=False)
     
-    print("\n--- Final Output Sample ---")
+    print("\n--- Final Output Sample (maintaining original test pair order) ---")
     print(long_format_df.head())
     OUTPUT_FILE_PATH = 'prediction.csv'
     long_format_df.to_csv(OUTPUT_FILE_PATH, index=False)
